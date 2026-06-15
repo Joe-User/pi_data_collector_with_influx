@@ -1,0 +1,19 @@
+[Unit]
+Description=pi-collector 1-Wire temperature collection
+After=network.target influxdb.service
+Wants=influxdb.service
+StartLimitIntervalSec=60
+StartLimitBurst=5
+
+[Service]
+Type=simple
+User=jsnaza
+Restart=on-failure
+RestartSec=5
+ExecStart=/opt/pi-collector/venv/bin/python /opt/pi-collector/collector.py
+StandardOutput=journal
+StandardError=journal
+SyslogIdentifier=pi-collector
+
+[Install]
+WantedBy=multi-user.target

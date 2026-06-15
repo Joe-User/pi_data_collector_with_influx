@@ -1,0 +1,44 @@
+# pi-collector configuration
+# Deployed to: /etc/pi-collector/config.toml
+# This file is managed by the TUI (Settings and Sensors tabs).
+# The collector daemon reloads it automatically each cycle.
+
+[collector]
+# Tag applied to every InfluxDB point — use to distinguish multiple Pis
+hostname = "bu-twr-02"
+# How often to poll sensors and write to InfluxDB (seconds)
+interval_seconds = 15
+
+# ---------------------------------------------------------------------------
+# Sensor labels
+# Auto-discovers all 28-* devices. Entries here assign a human-readable
+# location name used as an InfluxDB tag. Unlabeled sensors use their ID.
+# ---------------------------------------------------------------------------
+[sensors]
+
+[sensors."28-0b2281f0d981"]
+name = "living_room"
+
+[sensors."28-0b2281f7dbc8"]
+name = "basement_east"
+
+# ---------------------------------------------------------------------------
+# Local InfluxDB (required)
+# ---------------------------------------------------------------------------
+[influx.local]
+url    = "http://localhost:8086"
+token  = "REPLACE_WITH_YOUR_LOCAL_TOKEN"
+org    = "mi8"
+bucket = "bu-twr-02_telem"
+
+# ---------------------------------------------------------------------------
+# Remote InfluxDB replication (optional)
+# Uncomment and fill in once your remote instance is ready.
+# The collector writes to both simultaneously; a remote failure does not
+# affect local collection.
+# ---------------------------------------------------------------------------
+# [influx.remote]
+# url    = "https://influx.example.com"
+# token  = ""
+# org    = ""
+# bucket = ""
