@@ -20,6 +20,7 @@ from textual.widgets import (
     Header,
     Input,
     Label,
+    Sparkline,
     Static,
     TabbedContent,
     TabPane,
@@ -39,7 +40,6 @@ def load_config() -> dict:
 
 
 def load_config_rw():
-    """Load config with tomlkit so comments and structure are preserved on save."""
     with open(CONFIG_PATH, "r") as f:
         return tomlkit.load(f)
 
@@ -83,8 +83,7 @@ def service_control(action: str) -> tuple:
             ["sudo", "systemctl", action, "pi-collector"],
             capture_output=True, text=True, timeout=15,
         )
-        msg = (r.stderr.strip() or r.stdout.strip())
-        return r.returncode == 0, msg
+        return r.returncode == 0, (r.stderr.strip() or r.stdout.strip())
     except Exception as e:
         return False, str(e)
 
@@ -101,6 +100,47 @@ def get_service_logs(n: int = 30) -> str:
         return "Unable to fetch logs"
 
 
+def query_sparklines(local: dict, hours: int) -> dict:
+    """Return {source: [fahrenheit values asc]} from InfluxDB."""
+    client = InfluxDBClient(url=local["url"], token=local["token"], org=local["org"])
+    query = f"""
+from(bucket: "{local["bucket"]}")
+  |> range(start: -{hours}h)
+  |> filter(fn: (r) => r._measurement == "temperature" and r._field == "fahrenheit")
+  |> aggregateWindow(every: 1m, fn: mean, createEmpty: false)
+  |> sort(columns: ["_time"])
+"""
+    tables = client.query_api().query(query, org=local["org"])
+    data = {}
+    for table in tables:
+        for rec in table.records:
+            src = rec.values.get("source", "unknown")
+            val = rec.get_value()
+            if val is not None:
+                data.setdefault(src, []).append(val)
+    client.close()
+    return data
+
+
+def build_sparkline_widgets(data: dict) -> list:
+    """Build one Vertical(Label + Sparkline) per sensor source."""
+    blocks = []
+    for source, values in sorted(data.items()):
+        if len(values) < 2:
+            continue
+        safe_id = "sp_" + "".join(c if c.isalnum() else "_" for c in source)
+        summary = f"min {min(values):.1f}  max {max(values):.1f}  now {values[-1]:.1f} °F"
+        blocks.append(
+            Vertical(
+                Label(f"{source}  —  {summary}", classes="trend_label"),
+                Sparkline(values, summary_function=max),
+                id=safe_id,
+                classes="trend_block",
+            )
+        )
+    return blocks
+
+
 # ---------------------------------------------------------------------------
 # Dashboard tab
 # ---------------------------------------------------------------------------
@@ -108,29 +148,36 @@ def get_service_logs(n: int = 30) -> str:
 class DashboardTab(Static):
     DEFAULT_CSS = """
     DashboardTab { height: 1fr; padding: 1 2; }
+    .trend_block { height: 4; margin-bottom: 1; }
+    .trend_label { margin-bottom: 0; }
+    DashboardTab Sparkline { height: 2; }
     """
 
     def compose(self) -> ComposeResult:
         yield Label("", id="dash_svc_status")
-        yield Label("LIVE SENSOR READINGS", classes="section_title")
+        yield Label("LIVE READINGS", classes="section_title")
         yield DataTable(id="live_table")
+        yield Label("TEMPERATURE TRENDS (1h)", classes="section_title")
+        yield Static("Loading trend data...", id="dash_trends_placeholder")
 
     def on_mount(self) -> None:
         t = self.query_one("#live_table", DataTable)
-        t.add_columns("Location", "Sensor ID", "°F", "°C", "Read at")
-        self.refresh_data()
-        self.set_interval(15, self.refresh_data)
+        t.add_columns("Source", "Sensor ID", "°F", "°C", "Read at")
+        self._fetch_live()
+        self._fetch_sparklines()
+        self.set_interval(15, self._fetch_live)
+        self.set_interval(60, self._fetch_sparklines)
 
-    def refresh_data(self) -> None:
+    def refresh_status(self) -> None:
         status = service_status()
         color = "green" if status == "active" else "red"
         self.query_one("#dash_svc_status", Label).update(
             f"Collector service: [{color}]{status}[/{color}]"
         )
-        self._fetch_readings()
 
     @work(thread=True)
-    def _fetch_readings(self) -> None:
+    def _fetch_live(self) -> None:
+        self.app.call_from_thread(self.refresh_status)
         try:
             config = load_config()
         except Exception:
@@ -145,13 +192,35 @@ class DashboardTab(Static):
                 rows.append((source, sensor_id, f"{fahrenheit:.1f}", f"{celsius:.1f}", time.strftime("%H:%M:%S")))
             else:
                 rows.append((source, sensor_id, "ERR", "ERR", time.strftime("%H:%M:%S")))
-        self.app.call_from_thread(self._apply_readings, rows)
+        self.app.call_from_thread(self._apply_live, rows)
 
-    def _apply_readings(self, rows) -> None:
+    def _apply_live(self, rows) -> None:
         t = self.query_one("#live_table", DataTable)
         t.clear()
         for row in rows:
             t.add_row(*row)
+
+    @work(thread=True)
+    def _fetch_sparklines(self) -> None:
+        try:
+            config = load_config()
+            data = query_sparklines(config["influx"]["local"], hours=1)
+            self.app.call_from_thread(self._apply_sparklines, data)
+        except Exception:
+            pass
+
+    def _apply_sparklines(self, data: dict) -> None:
+        for sel in ("#dash_trends_placeholder", "#dash_trends_built"):
+            try:
+                self.query_one(sel).remove()
+            except Exception:
+                pass
+
+        blocks = build_sparkline_widgets(data)
+        if not blocks:
+            self.mount(Static("No trend data yet.", id="dash_trends_placeholder"))
+            return
+        self.mount(Vertical(*blocks, id="dash_trends_built"))
 
 
 # ---------------------------------------------------------------------------
@@ -162,26 +231,30 @@ class HistoryTab(Static):
     DEFAULT_CSS = """
     HistoryTab { height: 1fr; padding: 1 2; }
     .range_row { height: auto; margin-bottom: 1; }
+    .trend_block { height: 4; margin-bottom: 1; }
+    .trend_label { margin-bottom: 0; }
+    HistoryTab Sparkline { height: 2; }
     """
 
     hours: reactive[int] = reactive(1)
 
     def compose(self) -> ComposeResult:
-        yield Label("RECENT HISTORY", classes="section_title")
+        yield Label("HISTORY", classes="section_title")
         with Horizontal(classes="range_row"):
             yield Button("1h",  id="h1",  variant="primary")
             yield Button("6h",  id="h6")
             yield Button("24h", id="h24")
         yield Label("", id="history_status")
+        yield Static("Loading...", id="hist_trends_placeholder")
         yield DataTable(id="history_table")
 
     def on_mount(self) -> None:
         t = self.query_one("#history_table", DataTable)
-        t.add_columns("Time", "Location", "°F", "°C")
-        self._fetch_history()
+        t.add_columns("Time", "Source", "°F", "°C")
+        self._fetch_all()
 
     def watch_hours(self, _: int) -> None:
-        self._fetch_history()
+        self._fetch_all()
 
     @on(Button.Pressed, "#h1")
     def _h1(self) -> None:
@@ -201,23 +274,26 @@ class HistoryTab(Static):
         self.hours = hours
 
     @work(thread=True)
-    def _fetch_history(self) -> None:
-        self.app.call_from_thread(lambda: self.query_one("#history_status", Label).update("Loading..."))
+    def _fetch_all(self) -> None:
+        self.app.call_from_thread(
+            lambda: self.query_one("#history_status", Label).update("Loading...")
+        )
         try:
             config = load_config()
             local = config["influx"]["local"]
             client = InfluxDBClient(url=local["url"], token=local["token"], org=local["org"])
-            # Query fahrenheit only — avoids pivot which breaks on old records
-            # that used different tag names (pre-pi-collector data).
-            query = f"""
+
+            # Table data — newest first, limited to 200 rows
+            table_query = f"""
 from(bucket: "{local["bucket"]}")
   |> range(start: -{self.hours}h)
   |> filter(fn: (r) => r._measurement == "temperature" and r._field == "fahrenheit")
   |> sort(columns: ["_time"], desc: true)
   |> limit(n: 200)
 """
-            tables = client.query_api().query(query, org=local["org"])
+            tables = client.query_api().query(table_query, org=local["org"])
             rows = []
+            sparkline_raw = {}  # source -> [values] in desc order
             for table in tables:
                 for rec in table.records:
                     t = rec.get_time()
@@ -226,19 +302,42 @@ from(bucket: "{local["bucket"]}")
                     c_val = round((f_val - 32) * 5 / 9, 1) if f_val is not None else None
                     source = rec.values.get("source", "unknown")
                     rows.append((
-                        t_str,
-                        source,
+                        t_str, source,
                         f"{f_val:.1f}" if f_val is not None else "--",
                         f"{c_val:.1f}" if c_val is not None else "--",
                     ))
+                    if f_val is not None:
+                        sparkline_raw.setdefault(source, []).append(f_val)
+
             client.close()
-            self.app.call_from_thread(self._apply_history, rows)
+
+            # Sparklines need ascending order
+            sparkline_data = {src: list(reversed(vals)) for src, vals in sparkline_raw.items()}
+
+            self.app.call_from_thread(self._apply_all, rows, sparkline_data)
         except Exception as e:
             err_msg = f"[red]Query failed: {e}[/red]"
-            self.app.call_from_thread(lambda: self.query_one("#history_status", Label).update(err_msg))
+            self.app.call_from_thread(
+                lambda: self.query_one("#history_status", Label).update(err_msg)
+            )
 
-    def _apply_history(self, rows) -> None:
+    def _apply_all(self, rows, sparkline_data: dict) -> None:
         self.query_one("#history_status", Label).update(f"{len(rows)} records")
+
+        # Rebuild sparklines
+        for sel in ("#hist_trends_placeholder", "#hist_trends_built"):
+            try:
+                self.query_one(sel).remove()
+            except Exception:
+                pass
+
+        blocks = build_sparkline_widgets(sparkline_data)
+        if blocks:
+            self.mount(Vertical(*blocks, id="hist_trends_built"), before="#history_table")
+        else:
+            self.mount(Static("No data for this range.", id="hist_trends_placeholder"), before="#history_table")
+
+        # Rebuild table
         t = self.query_one("#history_table", DataTable)
         t.clear()
         for row in rows:
@@ -254,14 +353,14 @@ class SensorsTab(Static):
     SensorsTab { height: 1fr; padding: 1 2; }
     .sensor_row { height: auto; margin-bottom: 1; }
     .sensor_id_col { width: 35; padding-top: 1; }
-    .temp_col { width: 12; padding-top: 1; }
+    .temp_col { width: 16; padding-top: 1; }
     """
 
     def compose(self) -> ComposeResult:
-        yield Label("SENSOR LABELS", classes="section_title")
-        yield Label("Assign a friendly name to each discovered sensor.", classes="hint")
+        yield Label("SENSOR NAMES", classes="section_title")
+        yield Label("Names are written as the 'source' tag in InfluxDB.", classes="hint")
         yield Static("", id="sensors_body")
-        yield Button("Save Labels", id="save_sensors", variant="success")
+        yield Button("Save Names", id="save_sensors", variant="success")
         yield Label("", id="sensors_status")
 
     def on_mount(self) -> None:
@@ -283,16 +382,12 @@ class SensorsTab(Static):
         self.app.call_from_thread(self._mount_rows, sensor_data)
 
     def _mount_rows(self, sensor_data) -> None:
-        # Remove placeholder and any previous build
         for sel in ("#sensors_body", "#sensors_container"):
             try:
                 self.query_one(sel).remove()
             except Exception:
                 pass
 
-        # Build rows with children in the constructor so the whole tree
-        # is ready before mounting — Textual requires a widget be in the
-        # DOM before you can mount into it.
         rows = []
         for sensor_id, fahrenheit, celsius, name in sensor_data:
             temp_str = (
@@ -304,7 +399,7 @@ class SensorsTab(Static):
                 Horizontal(
                     Label(sensor_id, classes="sensor_id_col"),
                     Label(temp_str, classes="temp_col"),
-                    Input(value=name, placeholder="location name", id=f"s_{sensor_id}"),
+                    Input(value=name, placeholder="source name", id=f"s_{sensor_id}"),
                     classes="sensor_row",
                 )
             )
@@ -323,9 +418,8 @@ class SensorsTab(Static):
 
         for device_dir in sorted(W1_BASE.glob("28-*")):
             sensor_id = device_dir.name
-            widget_id = f"s_{sensor_id}"
             try:
-                inp = self.query_one(f"#{widget_id}", Input)
+                inp = self.query_one(f"#s_{sensor_id}", Input)
             except Exception:
                 continue
             name = inp.value.strip()
@@ -400,15 +494,15 @@ class SettingsTab(Static):
         self.query_one("#cfg_interval", Input).value = str(col.get("interval_seconds", 15))
 
         local = c.get("influx", {}).get("local", {})
-        self.query_one("#cfg_local_url", Input).value = local.get("url", "")
-        self.query_one("#cfg_local_token", Input).value = local.get("token", "")
-        self.query_one("#cfg_local_org", Input).value = local.get("org", "")
+        self.query_one("#cfg_local_url", Input).value    = local.get("url", "")
+        self.query_one("#cfg_local_token", Input).value  = local.get("token", "")
+        self.query_one("#cfg_local_org", Input).value    = local.get("org", "")
         self.query_one("#cfg_local_bucket", Input).value = local.get("bucket", "")
 
         remote = c.get("influx", {}).get("remote", {})
-        self.query_one("#cfg_remote_url", Input).value = remote.get("url", "")
-        self.query_one("#cfg_remote_token", Input).value = remote.get("token", "")
-        self.query_one("#cfg_remote_org", Input).value = remote.get("org", "")
+        self.query_one("#cfg_remote_url", Input).value    = remote.get("url", "")
+        self.query_one("#cfg_remote_token", Input).value  = remote.get("token", "")
+        self.query_one("#cfg_remote_org", Input).value    = remote.get("org", "")
         self.query_one("#cfg_remote_bucket", Input).value = remote.get("bucket", "")
 
     @on(Button.Pressed, "#save_settings")
@@ -419,7 +513,6 @@ class SettingsTab(Static):
             self.query_one("#settings_status", Label).update(f"[red]Load error: {e}[/red]")
             return
 
-        # collector section
         if "collector" not in doc:
             doc.add("collector", tomlkit.table())
         doc["collector"]["hostname"] = self.query_one("#cfg_hostname", Input).value.strip()
@@ -429,11 +522,10 @@ class SettingsTab(Static):
             )
         except ValueError:
             self.query_one("#settings_status", Label).update(
-                "[red]Interval must be a whole number of seconds.[/red]"
+                "[red]Interval must be a whole number.[/red]"
             )
             return
 
-        # local influx
         if "influx" not in doc:
             doc.add("influx", tomlkit.table())
         if "local" not in doc["influx"]:
@@ -443,7 +535,6 @@ class SettingsTab(Static):
         doc["influx"]["local"]["org"]    = self.query_one("#cfg_local_org", Input).value.strip()
         doc["influx"]["local"]["bucket"] = self.query_one("#cfg_local_bucket", Input).value.strip()
 
-        # remote influx (optional)
         remote_url = self.query_one("#cfg_remote_url", Input).value.strip()
         if remote_url:
             if "remote" not in doc["influx"]:
@@ -544,17 +635,14 @@ Screen { background: $surface; }
     margin-bottom: 1;
 }
 
-.hint {
-    color: $text-muted;
-    margin-bottom: 1;
-}
+.hint { color: $text-muted; margin-bottom: 1; }
+
+.trend_label { color: $text-muted; }
 
 Button { margin-right: 1; }
-
-Input { margin-bottom: 1; }
+Input  { margin-bottom: 1; }
 
 TabbedContent { height: 1fr; }
-
 TabPane { padding: 0; overflow-y: auto; }
 """
 
@@ -562,9 +650,7 @@ TabPane { padding: 0; overflow-y: auto; }
 class CollectorTUI(App):
     TITLE = "pi-collector"
     CSS = APP_CSS
-    BINDINGS = [
-        Binding("q", "quit", "Quit"),
-    ]
+    BINDINGS = [Binding("q", "quit", "Quit")]
 
     def compose(self) -> ComposeResult:
         yield Header()
