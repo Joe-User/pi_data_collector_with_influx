@@ -38,7 +38,7 @@ fi
 # ---------------------------------------------------------------------------
 echo "==> Creating directories..."
 sudo mkdir -p "$INSTALL_DIR" "$CONFIG_DIR"
-sudo chown "$(whoami):$(whoami)" "$INSTALL_DIR" "$CONFIG_DIR"
+sudo chown -R "$(whoami):$(whoami)" "$INSTALL_DIR" "$CONFIG_DIR"
 
 # ---------------------------------------------------------------------------
 # 3. Copy application files
