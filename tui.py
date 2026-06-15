@@ -286,17 +286,32 @@ class SensorsTab(Static):
         self.app.call_from_thread(self._mount_rows, sensor_data)
 
     def _mount_rows(self, sensor_data) -> None:
-        body = self.query_one("#sensors_body", Static)
-        body.remove()
-        container = Vertical(id="sensors_container")
-        self.mount(container, before="#save_sensors")
+        # Remove placeholder and any previous build
+        for sel in ("#sensors_body", "#sensors_container"):
+            try:
+                self.query_one(sel).remove()
+            except Exception:
+                pass
+
+        # Build rows with children in the constructor so the whole tree
+        # is ready before mounting — Textual requires a widget be in the
+        # DOM before you can mount into it.
+        rows = []
         for sensor_id, fahrenheit, celsius, name in sensor_data:
-            temp_str = f"{fahrenheit:.1f}°F / {celsius:.1f}°C" if fahrenheit is not None else "read error"
-            row = Horizontal(classes="sensor_row")
-            row.mount(Label(sensor_id, classes="sensor_id_col"))
-            row.mount(Label(temp_str, classes="temp_col"))
-            row.mount(Input(value=name, placeholder="location name", id=f"s_{sensor_id}"))
-            container.mount(row)
+            temp_str = (
+                f"{fahrenheit:.1f}°F / {celsius:.1f}°C"
+                if fahrenheit is not None
+                else "read error"
+            )
+            rows.append(
+                Horizontal(
+                    Label(sensor_id, classes="sensor_id_col"),
+                    Label(temp_str, classes="temp_col"),
+                    Input(value=name, placeholder="location name", id=f"s_{sensor_id}"),
+                    classes="sensor_row",
+                )
+            )
+        self.mount(Vertical(*rows, id="sensors_container"), before="#save_sensors")
 
     @on(Button.Pressed, "#save_sensors")
     def save_sensors(self) -> None:
