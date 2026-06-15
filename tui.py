@@ -207,16 +207,12 @@ class HistoryTab(Static):
             config = load_config()
             local = config["influx"]["local"]
             client = InfluxDBClient(url=local["url"], token=local["token"], org=local["org"])
+            # Query fahrenheit only — avoids pivot which breaks on old records
+            # that used different tag names (pre-pi-collector data).
             query = f"""
 from(bucket: "{local["bucket"]}")
   |> range(start: -{self.hours}h)
-  |> filter(fn: (r) => r._measurement == "temperature")
-  |> filter(fn: (r) => r._field == "fahrenheit" or r._field == "celsius")
-  |> pivot(
-       rowKey: ["_time", "location", "sensor_id", "host"],
-       columnKey: ["_field"],
-       valueColumn: "_value"
-     )
+  |> filter(fn: (r) => r._measurement == "temperature" and r._field == "fahrenheit")
   |> sort(columns: ["_time"], desc: true)
   |> limit(n: 200)
 """
@@ -226,11 +222,12 @@ from(bucket: "{local["bucket"]}")
                 for rec in table.records:
                     t = rec.get_time()
                     t_str = t.strftime("%m/%d %H:%M:%S") if t else "--"
-                    f_val = rec.values.get("fahrenheit")
-                    c_val = rec.values.get("celsius")
+                    f_val = rec.get_value()
+                    c_val = round((f_val - 32) * 5 / 9, 1) if f_val is not None else None
+                    location = rec.values.get("location") or rec.values.get("source", "unknown")
                     rows.append((
                         t_str,
-                        rec.values.get("location", "unknown"),
+                        location,
                         f"{f_val:.1f}" if f_val is not None else "--",
                         f"{c_val:.1f}" if c_val is not None else "--",
                     ))
