@@ -140,11 +140,11 @@ class DashboardTab(Static):
         for device_dir in sorted(W1_BASE.glob("28-*")):
             sensor_id = device_dir.name
             celsius, fahrenheit = read_1w_sensor(device_dir)
-            location = sensor_cfg.get(sensor_id, {}).get("name", sensor_id)
+            source = sensor_cfg.get(sensor_id, {}).get("name", sensor_id)
             if fahrenheit is not None:
-                rows.append((location, sensor_id, f"{fahrenheit:.1f}", f"{celsius:.1f}", time.strftime("%H:%M:%S")))
+                rows.append((source, sensor_id, f"{fahrenheit:.1f}", f"{celsius:.1f}", time.strftime("%H:%M:%S")))
             else:
-                rows.append((location, sensor_id, "ERR", "ERR", time.strftime("%H:%M:%S")))
+                rows.append((source, sensor_id, "ERR", "ERR", time.strftime("%H:%M:%S")))
         self.app.call_from_thread(self._apply_readings, rows)
 
     def _apply_readings(self, rows) -> None:
@@ -224,10 +224,10 @@ from(bucket: "{local["bucket"]}")
                     t_str = t.strftime("%m/%d %H:%M:%S") if t else "--"
                     f_val = rec.get_value()
                     c_val = round((f_val - 32) * 5 / 9, 1) if f_val is not None else None
-                    location = rec.values.get("location") or rec.values.get("source", "unknown")
+                    source = rec.values.get("source", "unknown")
                     rows.append((
                         t_str,
-                        location,
+                        source,
                         f"{f_val:.1f}" if f_val is not None else "--",
                         f"{c_val:.1f}" if c_val is not None else "--",
                     ))

@@ -69,17 +69,17 @@ def collect(config: dict) -> list[Point]:
         if fahrenheit is None:
             log.warning("Sensor %s: no valid reading after 3 attempts, skipping", sensor_id)
             continue
-        location = sensor_cfg.get(sensor_id, {}).get("name", sensor_id)
+        source = sensor_cfg.get(sensor_id, {}).get("name", sensor_id)
         point = (
             Point("temperature")
             .tag("host", hostname)
             .tag("sensor_id", sensor_id)
-            .tag("location", location)
+            .tag("source", source)
             .field("celsius", celsius)
             .field("fahrenheit", fahrenheit)
         )
         points.append(point)
-        log.info("%s (%s): %.2f°F / %.2f°C", location, sensor_id, fahrenheit, celsius)
+        log.info("%s (%s): %.2f°F / %.2f°C", source, sensor_id, fahrenheit, celsius)
 
     return points
 

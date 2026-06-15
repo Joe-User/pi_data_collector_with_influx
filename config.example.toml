@@ -10,9 +10,10 @@ hostname = "bu-twr-02"
 interval_seconds = 15
 
 # ---------------------------------------------------------------------------
-# Sensor labels
-# Auto-discovers all 28-* devices. Entries here assign a human-readable
-# location name used as an InfluxDB tag. Unlabeled sensors use their ID.
+# Sensor names
+# Auto-discovers all 28-* devices. Entries here set the 'source' tag value
+# written to InfluxDB, matching the schema used by the original daemon.
+# Unlabeled sensors use their hardware ID as the source.
 # ---------------------------------------------------------------------------
 [sensors]
 
