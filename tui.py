@@ -145,7 +145,7 @@ class DashboardTab(Static):
                 rows.append((location, sensor_id, f"{fahrenheit:.1f}", f"{celsius:.1f}", time.strftime("%H:%M:%S")))
             else:
                 rows.append((location, sensor_id, "ERR", "ERR", time.strftime("%H:%M:%S")))
-        self.call_from_thread(self._apply_readings, rows)
+        self.app.call_from_thread(self._apply_readings, rows)
 
     def _apply_readings(self, rows) -> None:
         t = self.query_one("#live_table", DataTable)
@@ -202,9 +202,7 @@ class HistoryTab(Static):
 
     @work(thread=True)
     def _fetch_history(self) -> None:
-        self.call_from_thread(
-            self.query_one("#history_status", Label).update, "Loading..."
-        )
+        self.app.call_from_thread(lambda: self.query_one("#history_status", Label).update("Loading..."))
         try:
             config = load_config()
             local = config["influx"]["local"]
@@ -237,12 +235,10 @@ from(bucket: "{local["bucket"]}")
                         f"{c_val:.1f}" if c_val is not None else "--",
                     ))
             client.close()
-            self.call_from_thread(self._apply_history, rows)
+            self.app.call_from_thread(self._apply_history, rows)
         except Exception as e:
-            self.call_from_thread(
-                self.query_one("#history_status", Label).update,
-                f"[red]Query failed: {e}[/red]",
-            )
+            err_msg = f"[red]Query failed: {e}[/red]"
+            self.app.call_from_thread(lambda: self.query_one("#history_status", Label).update(err_msg))
 
     def _apply_history(self, rows) -> None:
         self.query_one("#history_status", Label).update(f"{len(rows)} records")
@@ -287,7 +283,7 @@ class SensorsTab(Static):
             celsius, fahrenheit = read_1w_sensor(device_dir)
             name = sensor_cfg.get(sensor_id, {}).get("name", "")
             sensor_data.append((sensor_id, fahrenheit, celsius, name))
-        self.call_from_thread(self._mount_rows, sensor_data)
+        self.app.call_from_thread(self._mount_rows, sensor_data)
 
     def _mount_rows(self, sensor_data) -> None:
         body = self.query_one("#sensors_body", Static)
