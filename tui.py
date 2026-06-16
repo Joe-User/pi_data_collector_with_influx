@@ -2,12 +2,14 @@
 """pi-collector TUI — view sensor data and manage the collector service."""
 
 import subprocess
+import threading
 import time
 import tomllib
 from pathlib import Path
 
 import tomlkit
 from influxdb_client import InfluxDBClient
+from rich.text import Text
 from textual import on, work
 from textual.app import App, ComposeResult
 from textual.binding import Binding
@@ -20,14 +22,22 @@ from textual.widgets import (
     Header,
     Input,
     Label,
-    Sparkline,
     Static,
     TabbedContent,
     TabPane,
 )
 
+try:
+    import plotext as _plt
+    _PLOTEXT = True
+except ImportError:
+    _PLOTEXT = False
+
 CONFIG_PATH = Path("/etc/pi-collector/config.toml")
 W1_BASE = Path("/sys/bus/w1/devices/")
+
+# plotext mutates global state; serialize chart renders across threads
+_plot_lock = threading.Lock()
 
 
 # ---------------------------------------------------------------------------
@@ -88,7 +98,7 @@ def service_control(action: str) -> tuple:
         return False, str(e)
 
 
-def get_service_logs(n: int = 30) -> str:
+def get_service_logs(n: int = 40) -> str:
     try:
         r = subprocess.run(
             ["journalctl", "-u", "pi-collector", "-n", str(n),
@@ -100,16 +110,49 @@ def get_service_logs(n: int = 30) -> str:
         return "Unable to fetch logs"
 
 
-def query_sparklines(local: dict, hours: int) -> dict:
-    """Return {source: [fahrenheit values asc]} from InfluxDB."""
+def render_line_chart(source: str, values: list, width: int = 72, height: int = 10) -> Text:
+    """Render a plotext line chart to Rich Text (ANSI-parsed)."""
+    if not _PLOTEXT or len(values) < 2:
+        if values:
+            return Text(
+                f"{source}  —  min {min(values):.1f}  max {max(values):.1f}"
+                f"  now {values[-1]:.1f} °F  ({len(values)} pts)"
+            )
+        return Text(f"{source}  —  no data")
+
+    with _plot_lock:
+        _plt.clear_figure()
+        _plt.plot(values, marker="hd")
+        vmin, vmax, vnow = min(values), max(values), values[-1]
+        _plt.title(f"{source}   {vmin:.1f} min / {vmax:.1f} max / {vnow:.1f} now  (°F)")
+        _plt.plotsize(width, height)
+        _plt.canvas_color("none")
+        _plt.axes_color("none")
+        _plt.ticks_color("white")
+        _plt.build()
+        return Text.from_ansi(_plt.to_string())
+
+
+def build_charts(data: dict, width: int = 72) -> dict:
+    """Return {source: rich.Text} for each source that has enough data."""
+    return {
+        src: render_line_chart(src, vals, width=width)
+        for src, vals in sorted(data.items())
+        if len(vals) >= 2
+    }
+
+
+def fetch_chart_data(local: dict, hours: int) -> dict:
+    """Query InfluxDB and return {source: [fahrenheit values asc]}."""
+    every = "5m" if hours >= 6 else "1m"
     client = InfluxDBClient(url=local["url"], token=local["token"], org=local["org"])
-    query = f"""
-from(bucket: "{local["bucket"]}")
-  |> range(start: -{hours}h)
-  |> filter(fn: (r) => r._measurement == "temperature" and r._field == "fahrenheit")
-  |> aggregateWindow(every: 1m, fn: mean, createEmpty: false)
-  |> sort(columns: ["_time"])
-"""
+    query = (
+        f'from(bucket: "{local["bucket"]}")'
+        f' |> range(start: -{hours}h)'
+        f' |> filter(fn: (r) => r._measurement == "temperature" and r._field == "fahrenheit")'
+        f' |> aggregateWindow(every: {every}, fn: mean, createEmpty: false)'
+        f' |> sort(columns: ["_time"])'
+    )
     tables = client.query_api().query(query, org=local["org"])
     data = {}
     for table in tables:
@@ -122,23 +165,14 @@ from(bucket: "{local["bucket"]}")
     return data
 
 
-def build_sparkline_widgets(data: dict) -> list:
-    """Build one Vertical(Label + Sparkline) per sensor source."""
-    blocks = []
-    for source, values in sorted(data.items()):
-        if len(values) < 2:
-            continue
-        safe_id = "sp_" + "".join(c if c.isalnum() else "_" for c in source)
-        summary = f"min {min(values):.1f}  max {max(values):.1f}  now {values[-1]:.1f} °F"
-        blocks.append(
-            Vertical(
-                Label(f"{source}  —  {summary}", classes="trend_label"),
-                Sparkline(values, summary_function=max),
-                id=safe_id,
-                classes="trend_block",
-            )
-        )
-    return blocks
+def mount_charts(container, charts: dict) -> None:
+    """Replace all children of a container with one Static chart per source."""
+    container.remove_children()
+    if not charts:
+        container.mount(Static("No trend data available."))
+        return
+    for chart_text in charts.values():
+        container.mount(Static(chart_text, classes="chart_block"))
 
 
 # ---------------------------------------------------------------------------
@@ -148,9 +182,7 @@ def build_sparkline_widgets(data: dict) -> list:
 class DashboardTab(Static):
     DEFAULT_CSS = """
     DashboardTab { height: 1fr; padding: 1 2; }
-    .trend_block { height: 4; margin-bottom: 1; }
-    .trend_label { margin-bottom: 0; }
-    DashboardTab Sparkline { height: 2; }
+    .chart_block { height: 12; margin-bottom: 1; }
     """
 
     def compose(self) -> ComposeResult:
@@ -158,15 +190,15 @@ class DashboardTab(Static):
         yield Label("LIVE READINGS", classes="section_title")
         yield DataTable(id="live_table")
         yield Label("TEMPERATURE TRENDS (1h)", classes="section_title")
-        yield Static("Loading trend data...", id="dash_trends_placeholder")
+        yield Vertical(id="trends_container")
 
     def on_mount(self) -> None:
         t = self.query_one("#live_table", DataTable)
         t.add_columns("Source", "Sensor ID", "°F", "°C", "Read at")
         self._fetch_live()
-        self._fetch_sparklines()
+        self._fetch_charts()
         self.set_interval(15, self._fetch_live)
-        self.set_interval(60, self._fetch_sparklines)
+        self.set_interval(60, self._fetch_charts)
 
     def refresh_status(self) -> None:
         status = service_status()
@@ -201,26 +233,17 @@ class DashboardTab(Static):
             t.add_row(*row)
 
     @work(thread=True)
-    def _fetch_sparklines(self) -> None:
+    def _fetch_charts(self) -> None:
         try:
             config = load_config()
-            data = query_sparklines(config["influx"]["local"], hours=1)
-            self.app.call_from_thread(self._apply_sparklines, data)
+            data = fetch_chart_data(config["influx"]["local"], hours=1)
+            charts = build_charts(data)
+            self.app.call_from_thread(self._apply_charts, charts)
         except Exception:
             pass
 
-    def _apply_sparklines(self, data: dict) -> None:
-        for sel in ("#dash_trends_placeholder", "#dash_trends_built"):
-            try:
-                self.query_one(sel).remove()
-            except Exception:
-                pass
-
-        blocks = build_sparkline_widgets(data)
-        if not blocks:
-            self.mount(Static("No trend data yet.", id="dash_trends_placeholder"))
-            return
-        self.mount(Vertical(*blocks, id="dash_trends_built"))
+    def _apply_charts(self, charts: dict) -> None:
+        mount_charts(self.query_one("#trends_container", Vertical), charts)
 
 
 # ---------------------------------------------------------------------------
@@ -231,9 +254,7 @@ class HistoryTab(Static):
     DEFAULT_CSS = """
     HistoryTab { height: 1fr; padding: 1 2; }
     .range_row { height: auto; margin-bottom: 1; }
-    .trend_block { height: 4; margin-bottom: 1; }
-    .trend_label { margin-bottom: 0; }
-    HistoryTab Sparkline { height: 2; }
+    .chart_block { height: 12; margin-bottom: 1; }
     """
 
     hours: reactive[int] = reactive(1)
@@ -245,7 +266,8 @@ class HistoryTab(Static):
             yield Button("6h",  id="h6")
             yield Button("24h", id="h24")
         yield Label("", id="history_status")
-        yield Static("Loading...", id="hist_trends_placeholder")
+        yield Label("TRENDS", classes="section_title")
+        yield Vertical(id="hist_trends_container")
         yield DataTable(id="history_table")
 
     def on_mount(self) -> None:
@@ -269,8 +291,10 @@ class HistoryTab(Static):
         self._set_range(24, "h24")
 
     def _set_range(self, hours: int, active_id: str) -> None:
-        for btn_id in ["h1", "h6", "h24"]:
-            self.query_one(f"#{btn_id}", Button).variant = "primary" if btn_id == active_id else "default"
+        for btn_id in ("h1", "h6", "h24"):
+            self.query_one(f"#{btn_id}", Button).variant = (
+                "primary" if btn_id == active_id else "default"
+            )
         self.hours = hours
 
     @work(thread=True)
@@ -283,17 +307,16 @@ class HistoryTab(Static):
             local = config["influx"]["local"]
             client = InfluxDBClient(url=local["url"], token=local["token"], org=local["org"])
 
-            # Table data — newest first, limited to 200 rows
-            table_query = f"""
-from(bucket: "{local["bucket"]}")
-  |> range(start: -{self.hours}h)
-  |> filter(fn: (r) => r._measurement == "temperature" and r._field == "fahrenheit")
-  |> sort(columns: ["_time"], desc: true)
-  |> limit(n: 200)
-"""
+            # Recent readings for the table (newest first, capped at 200)
+            table_query = (
+                f'from(bucket: "{local["bucket"]}")'
+                f' |> range(start: -{self.hours}h)'
+                f' |> filter(fn: (r) => r._measurement == "temperature" and r._field == "fahrenheit")'
+                f' |> sort(columns: ["_time"], desc: true)'
+                f' |> limit(n: 200)'
+            )
             tables = client.query_api().query(table_query, org=local["org"])
             rows = []
-            sparkline_raw = {}  # source -> [values] in desc order
             for table in tables:
                 for rec in table.records:
                     t = rec.get_time()
@@ -306,38 +329,25 @@ from(bucket: "{local["bucket"]}")
                         f"{f_val:.1f}" if f_val is not None else "--",
                         f"{c_val:.1f}" if c_val is not None else "--",
                     ))
-                    if f_val is not None:
-                        sparkline_raw.setdefault(source, []).append(f_val)
 
             client.close()
 
-            # Sparklines need ascending order
-            sparkline_data = {src: list(reversed(vals)) for src, vals in sparkline_raw.items()}
+            # Aggregated data for charts (separate query covers the full range)
+            chart_data = fetch_chart_data(local, self.hours)
+            charts = build_charts(chart_data)
 
-            self.app.call_from_thread(self._apply_all, rows, sparkline_data)
+            self.app.call_from_thread(self._apply_all, rows, charts)
         except Exception as e:
-            err_msg = f"[red]Query failed: {e}[/red]"
+            err = f"[red]Query failed: {e}[/red]"
             self.app.call_from_thread(
-                lambda: self.query_one("#history_status", Label).update(err_msg)
+                lambda: self.query_one("#history_status", Label).update(err)
             )
 
-    def _apply_all(self, rows, sparkline_data: dict) -> None:
-        self.query_one("#history_status", Label).update(f"{len(rows)} records")
-
-        # Rebuild sparklines
-        for sel in ("#hist_trends_placeholder", "#hist_trends_built"):
-            try:
-                self.query_one(sel).remove()
-            except Exception:
-                pass
-
-        blocks = build_sparkline_widgets(sparkline_data)
-        if blocks:
-            self.mount(Vertical(*blocks, id="hist_trends_built"), before="#history_table")
-        else:
-            self.mount(Static("No data for this range.", id="hist_trends_placeholder"), before="#history_table")
-
-        # Rebuild table
+    def _apply_all(self, rows, charts: dict) -> None:
+        self.query_one("#history_status", Label).update(
+            f"{len(rows)} records (most recent first)"
+        )
+        mount_charts(self.query_one("#hist_trends_container", Vertical), charts)
         t = self.query_one("#history_table", DataTable)
         t.clear()
         for row in rows:
@@ -466,7 +476,7 @@ class SettingsTab(Static):
         yield Input(id="cfg_local_bucket")
 
         yield Label("REMOTE INFLUXDB — optional replication", classes="section_title")
-        yield Label("Leave URL blank to disable. Fill in when your remote instance is ready.")
+        yield Label("Leave URL blank to disable.")
         yield Label("URL")
         yield Input(id="cfg_remote_url", placeholder="https://influx.example.com")
         yield Label("Token")
@@ -549,7 +559,7 @@ class SettingsTab(Static):
         try:
             save_config(doc)
             self.query_one("#settings_status", Label).update(
-                "[green]Saved — collector reloads config each cycle automatically.[/green]"
+                "[green]Saved — collector reloads config automatically.[/green]"
             )
         except Exception as e:
             self.query_one("#settings_status", Label).update(f"[red]Save failed: {e}[/red]")
@@ -636,8 +646,6 @@ Screen { background: $surface; }
 }
 
 .hint { color: $text-muted; margin-bottom: 1; }
-
-.trend_label { color: $text-muted; }
 
 Button { margin-right: 1; }
 Input  { margin-bottom: 1; }
