@@ -1,6 +1,7 @@
 #!/usr/bin/env python3
 """pi-collector TUI — view sensor data and manage the collector service."""
 
+import re
 import subprocess
 import threading
 import time
@@ -142,14 +143,21 @@ def build_charts(data: dict, width: int = 72) -> dict:
     }
 
 
-def fetch_chart_data(local: dict, hours: int) -> dict:
-    """Query InfluxDB and return {source: [fahrenheit values asc]}."""
+def fetch_chart_data(local: dict, hours: int, sources: list = None) -> dict:
+    """Query InfluxDB and return {source: [fahrenheit values asc]}.
+
+    sources: if provided, only these source names are queried.
+    """
     every = "5m" if hours >= 6 else "1m"
     client = InfluxDBClient(url=local["url"], token=local["token"], org=local["org"])
+    src_filter = ""
+    if sources:
+        conditions = " or ".join(f'r.source == "{s}"' for s in sources)
+        src_filter = f" and ({conditions})"
     query = (
         f'from(bucket: "{local["bucket"]}")'
         f' |> range(start: -{hours}h)'
-        f' |> filter(fn: (r) => r._measurement == "temperature" and r._field == "fahrenheit")'
+        f' |> filter(fn: (r) => r._measurement == "temperature" and r._field == "fahrenheit"{src_filter})'
         f' |> aggregateWindow(every: {every}, fn: mean, createEmpty: false)'
         f' |> sort(columns: ["_time"])'
     )
@@ -179,26 +187,109 @@ def mount_charts(container, charts: dict) -> None:
 # Dashboard tab
 # ---------------------------------------------------------------------------
 
+def _safe_btn_id(src: str) -> str:
+    return "sf_" + re.sub(r"[^a-zA-Z0-9_-]", "_", src)
+
+
 class DashboardTab(Static):
     DEFAULT_CSS = """
     DashboardTab { height: 1fr; padding: 1 2; }
-    .chart_block { height: 12; margin-bottom: 1; }
+    .chart_block  { height: 12; margin-bottom: 1; }
+    .controls_row { height: auto; margin-bottom: 1; }
     """
+
+    hours: reactive[int] = reactive(1)
+
+    def __init__(self, **kwargs):
+        super().__init__(**kwargs)
+        self._selected_sources: set = set()
+        self._btn_id_to_src: dict = {}
 
     def compose(self) -> ComposeResult:
         yield Label("", id="dash_svc_status")
+        yield Label("TIME RANGE", classes="section_title")
+        with Horizontal(classes="controls_row"):
+            yield Button("1h",  id="d_h1",  variant="primary")
+            yield Button("6h",  id="d_h6")
+            yield Button("24h", id="d_h24")
+        yield Label("SENSORS", classes="section_title")
+        yield Horizontal(id="sensor_btns", classes="controls_row")
         yield Label("LIVE READINGS", classes="section_title")
         yield DataTable(id="live_table")
-        yield Label("TEMPERATURE TRENDS (1h)", classes="section_title")
+        yield Label("TEMPERATURE TRENDS (1h)", id="trends_title", classes="section_title")
         yield Vertical(id="trends_container")
 
     def on_mount(self) -> None:
         t = self.query_one("#live_table", DataTable)
         t.add_columns("Source", "Sensor ID", "°F", "°C", "Read at")
+        self._load_sensor_buttons()
         self._fetch_live()
         self._fetch_charts()
         self.set_interval(15, self._fetch_live)
         self.set_interval(60, self._fetch_charts)
+
+    def _load_sensor_buttons(self) -> None:
+        try:
+            config = load_config()
+            sensor_cfg = config.get("sensors", {})
+            sources = sorted(cfg.get("name", sid) for sid, cfg in sensor_cfg.items())
+        except Exception:
+            sources = []
+        if not sources:
+            sources = sorted(d.name for d in W1_BASE.glob("28-*"))
+
+        self._selected_sources = set(sources)
+        row = self.query_one("#sensor_btns", Horizontal)
+        for src in sources:
+            btn_id = _safe_btn_id(src)
+            self._btn_id_to_src[btn_id] = src
+            row.mount(Button(src, id=btn_id, variant="primary", classes="sensor_filter_btn"))
+
+    # --- Time range ---
+
+    @on(Button.Pressed, "#d_h1")
+    def _d_h1(self) -> None:
+        self._set_range(1, "d_h1")
+
+    @on(Button.Pressed, "#d_h6")
+    def _d_h6(self) -> None:
+        self._set_range(6, "d_h6")
+
+    @on(Button.Pressed, "#d_h24")
+    def _d_h24(self) -> None:
+        self._set_range(24, "d_h24")
+
+    def _set_range(self, hours: int, active_id: str) -> None:
+        for btn_id in ("d_h1", "d_h6", "d_h24"):
+            self.query_one(f"#{btn_id}", Button).variant = (
+                "primary" if btn_id == active_id else "default"
+            )
+        self.hours = hours
+
+    def watch_hours(self, h: int) -> None:
+        try:
+            self.query_one("#trends_title", Label).update(f"TEMPERATURE TRENDS ({h}h)")
+        except Exception:
+            pass
+        self._fetch_charts()
+
+    # --- Sensor filter ---
+
+    @on(Button.Pressed, ".sensor_filter_btn")
+    def _toggle_sensor(self, event: Button.Pressed) -> None:
+        btn = event.button
+        src = self._btn_id_to_src.get(btn.id, "")
+        if not src:
+            return
+        if src in self._selected_sources:
+            self._selected_sources.discard(src)
+            btn.variant = "default"
+        else:
+            self._selected_sources.add(src)
+            btn.variant = "primary"
+        self._fetch_charts()
+
+    # --- Workers ---
 
     def refresh_status(self) -> None:
         status = service_status()
@@ -234,9 +325,19 @@ class DashboardTab(Static):
 
     @work(thread=True)
     def _fetch_charts(self) -> None:
+        selected = set(self._selected_sources)  # snapshot; avoid races
+        if not selected:
+            self.app.call_from_thread(
+                lambda: mount_charts(self.query_one("#trends_container", Vertical), {})
+            )
+            return
         try:
             config = load_config()
-            data = fetch_chart_data(config["influx"]["local"], hours=1)
+            data = fetch_chart_data(
+                config["influx"]["local"],
+                hours=self.hours,
+                sources=list(selected),
+            )
             charts = build_charts(data)
             self.app.call_from_thread(self._apply_charts, charts)
         except Exception:
