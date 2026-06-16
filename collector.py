@@ -19,6 +19,29 @@ from influxdb_client.client.write_api import SYNCHRONOUS
 CONFIG_PATH = Path("/etc/pi-collector/config.toml")
 W1_BASE = Path("/sys/bus/w1/devices/")
 
+# 1-Wire family code -> sensor model name.
+# All of these use the same w1_slave read format.
+SENSOR_TYPES: dict[str, str] = {
+    "10": "DS18S20",
+    "22": "DS1822",
+    "28": "DS18B20",
+    "3b": "DS1825",
+    "42": "DS28EA00",
+}
+
+
+def detect_sensor_type(device_dir: Path) -> str:
+    family = device_dir.name.split("-")[0].lower()
+    return SENSOR_TYPES.get(family, f"1W-{family.upper()}")
+
+
+def find_temp_sensors() -> list:
+    """Return all 1-Wire temperature sensor directories, sorted by name."""
+    return sorted(
+        d for d in W1_BASE.iterdir()
+        if d.name.split("-")[0].lower() in SENSOR_TYPES
+    )
+
 logging.basicConfig(
     level=logging.INFO,
     format="%(asctime)s %(levelname)s %(message)s",
@@ -63,23 +86,26 @@ def collect(config: dict) -> list[Point]:
     hostname = config["collector"].get("hostname", "pi")
     points = []
 
-    for device_dir in sorted(W1_BASE.glob("28-*")):
+    for device_dir in find_temp_sensors():
         sensor_id = device_dir.name
         celsius, fahrenheit = read_1w_sensor(device_dir)
         if fahrenheit is None:
             log.warning("Sensor %s: no valid reading after 3 attempts, skipping", sensor_id)
             continue
-        source = sensor_cfg.get(sensor_id, {}).get("name", sensor_id)
+        scfg = sensor_cfg.get(sensor_id, {})
+        source = scfg.get("name", sensor_id)
+        sensor_type = scfg.get("type") or detect_sensor_type(device_dir)
         point = (
             Point("temperature")
             .tag("host", hostname)
             .tag("sensor_id", sensor_id)
             .tag("source", source)
+            .tag("sensor_type", sensor_type)
             .field("celsius", celsius)
             .field("fahrenheit", fahrenheit)
         )
         points.append(point)
-        log.info("%s (%s): %.2f°F / %.2f°C", source, sensor_id, fahrenheit, celsius)
+        log.info("%s (%s) [%s]: %.2f°F / %.2f°C", source, sensor_id, sensor_type, fahrenheit, celsius)
 
     return points
 

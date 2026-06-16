@@ -38,6 +38,28 @@ except ImportError:
 CONFIG_PATH = Path("/etc/pi-collector/config.toml")
 W1_BASE = Path("/sys/bus/w1/devices/")
 
+SENSOR_TYPES: dict = {
+    "10": "DS18S20",
+    "22": "DS1822",
+    "28": "DS18B20",
+    "3b": "DS1825",
+    "42": "DS28EA00",
+}
+
+
+def detect_sensor_type(device_dir: Path) -> str:
+    family = device_dir.name.split("-")[0].lower()
+    return SENSOR_TYPES.get(family, f"1W-{family.upper()}")
+
+
+def find_temp_sensors() -> list:
+    """Return all 1-Wire temperature sensor directories, sorted by name."""
+    return sorted(
+        d for d in W1_BASE.iterdir()
+        if d.name.split("-")[0].lower() in SENSOR_TYPES
+    )
+
+
 # plotext mutates global state; serialize chart renders across threads
 _plot_lock = threading.Lock()
 
@@ -230,7 +252,7 @@ class DashboardTab(Static):
 
     def on_mount(self) -> None:
         t = self.query_one("#live_table", DataTable)
-        t.add_columns("Source", "Sensor ID", "°F", "°C", "Read at")
+        t.add_columns("Source", "Type", "Sensor ID", "°F", "°C", "Read at")
         self._load_sensor_buttons()
         self._fetch_live()
         self._fetch_charts()
@@ -245,7 +267,7 @@ class DashboardTab(Static):
         except Exception:
             sources = []
         if not sources:
-            sources = sorted(d.name for d in W1_BASE.glob("28-*"))
+            sources = sorted(d.name for d in find_temp_sensors())
 
         self._selected_sources = set(sources)
         row = self.query_one("#sensor_btns", Horizontal)
@@ -316,14 +338,16 @@ class DashboardTab(Static):
             return
         sensor_cfg = config.get("sensors", {})
         rows = []
-        for device_dir in sorted(W1_BASE.glob("28-*")):
+        for device_dir in find_temp_sensors():
             sensor_id = device_dir.name
             celsius, fahrenheit = read_1w_sensor(device_dir)
-            source = sensor_cfg.get(sensor_id, {}).get("name", sensor_id)
+            scfg = sensor_cfg.get(sensor_id, {})
+            source = scfg.get("name", sensor_id)
+            sensor_type = scfg.get("type") or detect_sensor_type(device_dir)
             if fahrenheit is not None:
-                rows.append((source, sensor_id, f"{fahrenheit:.1f}", f"{celsius:.1f}", time.strftime("%H:%M:%S")))
+                rows.append((source, sensor_type, sensor_id, f"{fahrenheit:.1f}", f"{celsius:.1f}", time.strftime("%H:%M:%S")))
             else:
-                rows.append((source, sensor_id, "ERR", "ERR", time.strftime("%H:%M:%S")))
+                rows.append((source, sensor_type, sensor_id, "ERR", "ERR", time.strftime("%H:%M:%S")))
         self.app.call_from_thread(self._apply_live, rows)
 
     def _apply_live(self, rows) -> None:
@@ -471,15 +495,19 @@ class SensorsTab(Static):
     DEFAULT_CSS = """
     SensorsTab { height: 1fr; padding: 1 2; }
     .sensor_row { height: auto; margin-bottom: 1; }
-    .sensor_id_col { width: 35; padding-top: 1; }
-    .temp_col { width: 16; padding-top: 1; }
+    .sensor_id_col { width: 30; padding-top: 1; }
+    .type_col     { width: 12; padding-top: 1; color: $accent; }
+    .temp_col     { width: 18; padding-top: 1; }
     """
 
     def compose(self) -> ComposeResult:
-        yield Label("SENSOR NAMES", classes="section_title")
-        yield Label("Names are written as the 'source' tag in InfluxDB.", classes="hint")
+        yield Label("SENSOR CONFIGURATION", classes="section_title")
+        yield Label(
+            "Type is auto-detected from the 1-Wire family code and saved to config.",
+            classes="hint",
+        )
         yield Static("", id="sensors_body")
-        yield Button("Save Names", id="save_sensors", variant="success")
+        yield Button("Save", id="save_sensors", variant="success")
         yield Label("", id="sensors_status")
 
     def on_mount(self) -> None:
@@ -493,11 +521,13 @@ class SensorsTab(Static):
             config = {}
         sensor_cfg = config.get("sensors", {})
         sensor_data = []
-        for device_dir in sorted(W1_BASE.glob("28-*")):
+        for device_dir in find_temp_sensors():
             sensor_id = device_dir.name
             celsius, fahrenheit = read_1w_sensor(device_dir)
-            name = sensor_cfg.get(sensor_id, {}).get("name", "")
-            sensor_data.append((sensor_id, fahrenheit, celsius, name))
+            scfg = sensor_cfg.get(sensor_id, {})
+            name = scfg.get("name", "")
+            sensor_type = scfg.get("type") or detect_sensor_type(device_dir)
+            sensor_data.append((sensor_id, fahrenheit, celsius, name, sensor_type))
         self.app.call_from_thread(self._mount_rows, sensor_data)
 
     def _mount_rows(self, sensor_data) -> None:
@@ -508,7 +538,7 @@ class SensorsTab(Static):
                 pass
 
         rows = []
-        for sensor_id, fahrenheit, celsius, name in sensor_data:
+        for sensor_id, fahrenheit, celsius, name, sensor_type in sensor_data:
             temp_str = (
                 f"{fahrenheit:.1f}°F / {celsius:.1f}°C"
                 if fahrenheit is not None
@@ -517,6 +547,7 @@ class SensorsTab(Static):
             rows.append(
                 Horizontal(
                     Label(sensor_id, classes="sensor_id_col"),
+                    Label(sensor_type, classes="type_col"),
                     Label(temp_str, classes="temp_col"),
                     Input(value=name, placeholder="source name", id=f"s_{sensor_id}"),
                     classes="sensor_row",
@@ -535,24 +566,26 @@ class SensorsTab(Static):
         if "sensors" not in doc:
             doc.add("sensors", tomlkit.table())
 
-        for device_dir in sorted(W1_BASE.glob("28-*")):
+        for device_dir in find_temp_sensors():
             sensor_id = device_dir.name
             try:
                 inp = self.query_one(f"#s_{sensor_id}", Input)
             except Exception:
                 continue
             name = inp.value.strip()
+            sensor_type = detect_sensor_type(device_dir)
             if name:
                 if sensor_id not in doc["sensors"]:
                     doc["sensors"].add(sensor_id, tomlkit.table())
                 doc["sensors"][sensor_id]["name"] = name
+                doc["sensors"][sensor_id]["type"] = sensor_type
             elif sensor_id in doc["sensors"]:
                 del doc["sensors"][sensor_id]
 
         try:
             save_config(doc)
             self.query_one("#sensors_status", Label).update(
-                "[green]Saved — collector picks up new names on next cycle.[/green]"
+                "[green]Saved.[/green]"
             )
         except Exception as e:
             self.query_one("#sensors_status", Label).update(f"[red]Save failed: {e}[/red]")
