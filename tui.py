@@ -129,8 +129,8 @@ def render_line_chart(source: str, values: list, width: int = 72, height: int = 
         _plt.canvas_color("none")
         _plt.axes_color("none")
         _plt.ticks_color("white")
-        _plt.build()
-        return Text.from_ansi(_plt.to_string())
+        chart_str = _plt.build()
+        return Text.from_ansi(chart_str)
 
 
 def build_charts(data: dict, width: int = 72) -> dict:
