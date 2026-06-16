@@ -1,6 +1,7 @@
 #!/usr/bin/env python3
 """pi-collector TUI — view sensor data and manage the collector service."""
 
+import os
 import re
 import subprocess
 import threading
@@ -111,8 +112,11 @@ def get_service_logs(n: int = 40) -> str:
         return "Unable to fetch logs"
 
 
-def render_line_chart(source: str, values: list, width: int = 72, height: int = 10) -> Text:
-    """Render a plotext line chart to Rich Text (ANSI-parsed)."""
+def render_line_chart(source: str, values: list) -> Text:
+    """Render a compact plotext line chart (5 rows) to Rich Text.
+
+    Width is derived from the real terminal width so the chart fills the line.
+    """
     if not _PLOTEXT or len(values) < 2:
         if values:
             return Text(
@@ -121,12 +125,18 @@ def render_line_chart(source: str, values: list, width: int = 72, height: int = 
             )
         return Text(f"{source}  —  no data")
 
+    try:
+        cols = os.get_terminal_size().columns
+    except OSError:
+        cols = 80
+    width = max(40, cols - 6)
+
     with _plot_lock:
         _plt.clear_figure()
         _plt.plot(values, marker="hd")
         vmin, vmax, vnow = min(values), max(values), values[-1]
         _plt.title(f"{source}   {vmin:.1f} min / {vmax:.1f} max / {vnow:.1f} now  (°F)")
-        _plt.plotsize(width, height)
+        _plt.plotsize(width, 5)
         _plt.canvas_color("none")
         _plt.axes_color("none")
         _plt.ticks_color("white")
@@ -134,10 +144,10 @@ def render_line_chart(source: str, values: list, width: int = 72, height: int = 
         return Text.from_ansi(chart_str)
 
 
-def build_charts(data: dict, width: int = 72) -> dict:
+def build_charts(data: dict) -> dict:
     """Return {source: rich.Text} for each source that has enough data."""
     return {
-        src: render_line_chart(src, vals, width=width)
+        src: render_line_chart(src, vals)
         for src, vals in sorted(data.items())
         if len(vals) >= 2
     }
@@ -194,7 +204,6 @@ def _safe_btn_id(src: str) -> str:
 class DashboardTab(Static):
     DEFAULT_CSS = """
     DashboardTab { height: 1fr; padding: 1 2; }
-    .chart_block  { height: 12; margin-bottom: 1; }
     .controls_row { height: auto; margin-bottom: 1; }
     """
 
@@ -355,7 +364,6 @@ class HistoryTab(Static):
     DEFAULT_CSS = """
     HistoryTab { height: 1fr; padding: 1 2; }
     .range_row { height: auto; margin-bottom: 1; }
-    .chart_block { height: 12; margin-bottom: 1; }
     """
 
     hours: reactive[int] = reactive(1)
@@ -747,6 +755,12 @@ Screen { background: $surface; }
 }
 
 .hint { color: $text-muted; margin-bottom: 1; }
+
+.chart_block {
+    height: auto;
+    background: transparent;
+    margin-bottom: 1;
+}
 
 Button { margin-right: 1; }
 Input  { margin-bottom: 1; }
