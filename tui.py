@@ -24,6 +24,7 @@ from textual.widgets import (
     Header,
     Input,
     Label,
+    Select,
     Static,
     TabbedContent,
     TabPane,
@@ -58,6 +59,31 @@ def find_temp_sensors() -> list:
         d for d in W1_BASE.iterdir()
         if d.name.split("-")[0].lower() in SENSOR_TYPES
     )
+
+
+MEASUREMENT_OPTIONS = [
+    ("Temperature", "temperature"),
+    ("Humidity", "humidity"),
+    ("Temperature + Humidity", "temperature+humidity"),
+]
+
+
+def measurements_to_select_val(measurements: list) -> str:
+    has_t = "temperature" in measurements
+    has_h = "humidity" in measurements
+    if has_t and has_h:
+        return "temperature+humidity"
+    if has_h:
+        return "humidity"
+    return "temperature"
+
+
+def select_val_to_measurements(val) -> list:
+    if val == "temperature+humidity":
+        return ["temperature", "humidity"]
+    if val == "humidity":
+        return ["humidity"]
+    return ["temperature"]
 
 
 # plotext mutates global state; serialize chart renders across threads
@@ -98,6 +124,14 @@ def read_1w_sensor(device_dir: Path) -> tuple:
             pass
         time.sleep(0.1)
     return None, None
+
+
+def read_sensor_humidity(device_dir: Path):
+    """Read relative humidity from a sensor's sysfs humidity file."""
+    try:
+        return round(float((device_dir / "humidity").read_text().strip()), 1)
+    except Exception:
+        return None
 
 
 def service_status() -> str:
@@ -252,7 +286,7 @@ class DashboardTab(Static):
 
     def on_mount(self) -> None:
         t = self.query_one("#live_table", DataTable)
-        t.add_columns("Source", "Type", "Sensor ID", "°F", "°C", "Read at")
+        t.add_columns("Source", "Type", "Sensor ID", "°F", "°C", "RH%", "Read at")
         self._load_sensor_buttons()
         self._fetch_live()
         self._fetch_charts()
@@ -340,14 +374,22 @@ class DashboardTab(Static):
         rows = []
         for device_dir in find_temp_sensors():
             sensor_id = device_dir.name
-            celsius, fahrenheit = read_1w_sensor(device_dir)
             scfg = sensor_cfg.get(sensor_id, {})
             source = scfg.get("name", sensor_id)
             sensor_type = scfg.get("type") or detect_sensor_type(device_dir)
-            if fahrenheit is not None:
-                rows.append((source, sensor_type, sensor_id, f"{fahrenheit:.1f}", f"{celsius:.1f}", time.strftime("%H:%M:%S")))
-            else:
-                rows.append((source, sensor_type, sensor_id, "ERR", "ERR", time.strftime("%H:%M:%S")))
+            measurements = scfg.get("measurements", ["temperature"])
+            f_str = c_str = rh_str = "--"
+            if "temperature" in measurements:
+                celsius, fahrenheit = read_1w_sensor(device_dir)
+                if fahrenheit is not None:
+                    f_str = f"{fahrenheit:.1f}"
+                    c_str = f"{celsius:.1f}"
+                else:
+                    f_str = c_str = "ERR"
+            if "humidity" in measurements:
+                rh = read_sensor_humidity(device_dir)
+                rh_str = f"{rh:.1f}" if rh is not None else "ERR"
+            rows.append((source, sensor_type, sensor_id, f_str, c_str, rh_str, time.strftime("%H:%M:%S")))
         self.app.call_from_thread(self._apply_live, rows)
 
     def _apply_live(self, rows) -> None:
@@ -494,16 +536,26 @@ class HistoryTab(Static):
 class SensorsTab(Static):
     DEFAULT_CSS = """
     SensorsTab { height: 1fr; padding: 1 2; }
-    .sensor_row { height: auto; margin-bottom: 1; }
-    .sensor_id_col { width: 30; padding-top: 1; }
-    .type_col     { width: 12; padding-top: 1; color: $accent; }
-    .temp_col     { width: 18; padding-top: 1; }
+    .sensor_block {
+        height: auto;
+        border: solid $panel-darken-2;
+        padding: 0 1;
+        margin-bottom: 1;
+    }
+    .sensor_header { height: auto; }
+    .sensor_inputs { height: auto; }
+    .sensor_id_col { width: 22; }
+    .type_col      { width: 10; color: $accent; }
+    .reading_col   { width: 1fr; }
+    .field_label   { width: 10; padding-top: 1; }
+    .name_input    { width: 1fr; }
+    .measure_select { width: 28; }
     """
 
     def compose(self) -> ComposeResult:
         yield Label("SENSOR CONFIGURATION", classes="section_title")
         yield Label(
-            "Type is auto-detected from the 1-Wire family code and saved to config.",
+            "Type auto-detected from 1-Wire family code. Measurements determines what gets written to InfluxDB.",
             classes="hint",
         )
         yield Static("", id="sensors_body")
@@ -523,11 +575,24 @@ class SensorsTab(Static):
         sensor_data = []
         for device_dir in find_temp_sensors():
             sensor_id = device_dir.name
-            celsius, fahrenheit = read_1w_sensor(device_dir)
             scfg = sensor_cfg.get(sensor_id, {})
             name = scfg.get("name", "")
             sensor_type = scfg.get("type") or detect_sensor_type(device_dir)
-            sensor_data.append((sensor_id, fahrenheit, celsius, name, sensor_type))
+            measurements = scfg.get("measurements", ["temperature"])
+            mval = measurements_to_select_val(measurements)
+
+            readings = []
+            if "temperature" in measurements:
+                celsius, fahrenheit = read_1w_sensor(device_dir)
+                if fahrenheit is not None:
+                    readings.append(f"{fahrenheit:.1f}F / {celsius:.1f}C")
+            if "humidity" in measurements:
+                rh = read_sensor_humidity(device_dir)
+                if rh is not None:
+                    readings.append(f"{rh:.1f}% RH")
+            reading_str = "  ".join(readings) or "read error"
+
+            sensor_data.append((sensor_id, reading_str, name, sensor_type, mval))
         self.app.call_from_thread(self._mount_rows, sensor_data)
 
     def _mount_rows(self, sensor_data) -> None:
@@ -537,23 +602,27 @@ class SensorsTab(Static):
             except Exception:
                 pass
 
-        rows = []
-        for sensor_id, fahrenheit, celsius, name, sensor_type in sensor_data:
-            temp_str = (
-                f"{fahrenheit:.1f}°F / {celsius:.1f}°C"
-                if fahrenheit is not None
-                else "read error"
-            )
-            rows.append(
-                Horizontal(
-                    Label(sensor_id, classes="sensor_id_col"),
-                    Label(sensor_type, classes="type_col"),
-                    Label(temp_str, classes="temp_col"),
-                    Input(value=name, placeholder="source name", id=f"s_{sensor_id}"),
-                    classes="sensor_row",
+        blocks = []
+        for sensor_id, reading_str, name, sensor_type, mval in sensor_data:
+            blocks.append(
+                Vertical(
+                    Horizontal(
+                        Label(sensor_id, classes="sensor_id_col"),
+                        Label(sensor_type, classes="type_col"),
+                        Label(reading_str, classes="reading_col"),
+                        classes="sensor_header",
+                    ),
+                    Horizontal(
+                        Label("Name", classes="field_label"),
+                        Input(value=name, placeholder="source name", id=f"s_{sensor_id}", classes="name_input"),
+                        Label("Measures", classes="field_label"),
+                        Select(MEASUREMENT_OPTIONS, value=mval, id=f"m_{sensor_id}", classes="measure_select"),
+                        classes="sensor_inputs",
+                    ),
+                    classes="sensor_block",
                 )
             )
-        self.mount(Vertical(*rows, id="sensors_container"), before="#save_sensors")
+        self.mount(Vertical(*blocks, id="sensors_container"), before="#save_sensors")
 
     @on(Button.Pressed, "#save_sensors")
     def save_sensors(self) -> None:
@@ -570,23 +639,29 @@ class SensorsTab(Static):
             sensor_id = device_dir.name
             try:
                 inp = self.query_one(f"#s_{sensor_id}", Input)
+                sel = self.query_one(f"#m_{sensor_id}", Select)
             except Exception:
                 continue
             name = inp.value.strip()
             sensor_type = detect_sensor_type(device_dir)
-            if name:
+            sel_val = sel.value
+            if sel_val is Select.BLANK:
+                sel_val = "temperature"
+            measurements = select_val_to_measurements(sel_val)
+
+            if name or measurements != ["temperature"]:
                 if sensor_id not in doc["sensors"]:
                     doc["sensors"].add(sensor_id, tomlkit.table())
-                doc["sensors"][sensor_id]["name"] = name
+                if name:
+                    doc["sensors"][sensor_id]["name"] = name
                 doc["sensors"][sensor_id]["type"] = sensor_type
+                doc["sensors"][sensor_id]["measurements"] = measurements
             elif sensor_id in doc["sensors"]:
                 del doc["sensors"][sensor_id]
 
         try:
             save_config(doc)
-            self.query_one("#sensors_status", Label).update(
-                "[green]Saved.[/green]"
-            )
+            self.query_one("#sensors_status", Label).update("[green]Saved.[/green]")
         except Exception as e:
             self.query_one("#sensors_status", Label).update(f"[red]Save failed: {e}[/red]")
 
@@ -825,7 +900,11 @@ class CollectorTUI(App):
 
 
 def main() -> None:
-    CollectorTUI().run()
+    try:
+        CollectorTUI().run()
+    finally:
+        # Reset terminal attributes in case Textual left ANSI state behind
+        print("\033[0m\033[?25h", end="", flush=True)
 
 
 if __name__ == "__main__":

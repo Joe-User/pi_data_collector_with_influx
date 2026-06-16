@@ -81,6 +81,14 @@ def read_1w_sensor(device_dir: Path) -> tuple[float, float] | tuple[None, None]:
     return None, None
 
 
+def read_sensor_humidity(device_dir: Path):
+    """Read relative humidity from a sensor's sysfs humidity file."""
+    try:
+        return round(float((device_dir / "humidity").read_text().strip()), 1)
+    except Exception:
+        return None
+
+
 def collect(config: dict) -> list[Point]:
     sensor_cfg = config.get("sensors", {})
     hostname = config["collector"].get("hostname", "pi")
@@ -88,24 +96,41 @@ def collect(config: dict) -> list[Point]:
 
     for device_dir in find_temp_sensors():
         sensor_id = device_dir.name
-        celsius, fahrenheit = read_1w_sensor(device_dir)
-        if fahrenheit is None:
-            log.warning("Sensor %s: no valid reading after 3 attempts, skipping", sensor_id)
-            continue
         scfg = sensor_cfg.get(sensor_id, {})
         source = scfg.get("name", sensor_id)
         sensor_type = scfg.get("type") or detect_sensor_type(device_dir)
-        point = (
-            Point("temperature")
-            .tag("host", hostname)
-            .tag("sensor_id", sensor_id)
-            .tag("source", source)
-            .tag("sensor_type", sensor_type)
-            .field("celsius", celsius)
-            .field("fahrenheit", fahrenheit)
-        )
-        points.append(point)
-        log.info("%s (%s) [%s]: %.2f°F / %.2f°C", source, sensor_id, sensor_type, fahrenheit, celsius)
+        measurements = scfg.get("measurements", ["temperature"])
+
+        if "temperature" in measurements:
+            celsius, fahrenheit = read_1w_sensor(device_dir)
+            if fahrenheit is not None:
+                points.append(
+                    Point("temperature")
+                    .tag("host", hostname)
+                    .tag("sensor_id", sensor_id)
+                    .tag("source", source)
+                    .tag("sensor_type", sensor_type)
+                    .field("celsius", celsius)
+                    .field("fahrenheit", fahrenheit)
+                )
+                log.info("%s [%s]: %.2f°F / %.2f°C", source, sensor_type, fahrenheit, celsius)
+            else:
+                log.warning("Sensor %s: no valid temperature reading, skipping", sensor_id)
+
+        if "humidity" in measurements:
+            rh = read_sensor_humidity(device_dir)
+            if rh is not None:
+                points.append(
+                    Point("humidity")
+                    .tag("host", hostname)
+                    .tag("sensor_id", sensor_id)
+                    .tag("source", source)
+                    .tag("sensor_type", sensor_type)
+                    .field("percent_rh", rh)
+                )
+                log.info("%s [%s]: %.1f%% RH", source, sensor_type, rh)
+            else:
+                log.warning("Sensor %s: no valid humidity reading", sensor_id)
 
     return points
 
