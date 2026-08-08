@@ -1,0 +1,91 @@
+# Baseline hooks. Applies under every stack kit; append the kit's own hooks below.
+#
+# Install both stages (the second is required for the commit message check,
+# and `pre-commit install` alone does NOT set it up):
+#
+#   pre-commit install
+#   pre-commit install --hook-type commit-msg
+#
+# Bump pinned revs with: pre-commit autoupdate
+
+repos:
+  # Secret scanning. Previously present in only 4 of 22 repos. Pinned current
+  # rather than at the v8.18.4 those four used, for rule coverage on formats
+  # that did not exist when 8.18 shipped.
+  #
+  # Verified detecting: GitHub classic PAT, GitHub fine-grained PAT, AWS access
+  # key id, Slack bot token, RSA private key block. Both 8.18.4 and 8.28.0 catch
+  # all of those, so this bump is maintenance, not a fix for a known miss.
+  #
+  # Note when testing this: gitleaks allowlists the AWS documentation example
+  # key (wJalrXUtnFEMI/...EXAMPLEKEY) by design, and it enforces exact token
+  # shapes, so a hand-typed fake of the wrong length reads as a false negative.
+  # Generate fixtures at the real format or you will chase a gap that is not there.
+  - repo: https://github.com/gitleaks/gitleaks
+    rev: v8.28.0
+    hooks:
+      - id: gitleaks
+
+  # Text hygiene and commit format, from the engineering-standards repo so the
+  # rules exist once rather than being vendored into every project. The em-dash
+  # rule previously existed as four separate hand-rolled implementations.
+  #
+  # INTERIM: pointed at the local checkout because the remote does not exist yet.
+  # At Phase 5 (remotes) swap to:
+  #   repo: https://github.com/Joe-User/engineering-standards
+  # and after the Gitea migration, to the Gitea URL. The `rev` stays the same.
+  - repo: C:/Repositories/engineering-standards
+    rev: v1.0.0
+    hooks:
+      # Checks only the lines a commit ADDS. The portfolio carries ~2,200
+      # pre-existing em dashes across 307 files, so whole-file gating would
+      # block almost any edit and the hook would just get disabled.
+      - id: no-em-dash
+
+      # Console-facing files only (.ps1 .bat .cmd .sh). Emoji break ANSI
+      # handling in PowerShell; they are fine in a web UI.
+      - id: no-emoji
+      - id: no-box-drawing
+
+      # Runs at the commit-msg stage. Needs the second install command above.
+      - id: conventional-commit
+
+  # Generic file hygiene. Cheap, and catches the mistakes nobody reviews for.
+  #
+  # CHECK-ONLY, deliberately. The mutating hooks from this collection
+  # (end-of-file-fixer, trailing-whitespace, mixed-line-ending --fix) are
+  # excluded because standards/CONVENTIONS.md says no tool in these kits rewrites
+  # your files. .editorconfig already declares trailing-whitespace and final-newline
+  # behavior for editors, and .gitattributes handles line endings at the git layer,
+  # so both are covered declaratively without a hook editing your work.
+  - repo: https://github.com/pre-commit/pre-commit-hooks
+    rev: v5.0.0
+    hooks:
+      - id: check-merge-conflict
+      - id: check-added-large-files
+        args: ["--maxkb=1024"]
+      - id: check-json
+      # NOTE: check-yaml chokes on custom tags. Home Assistant configs use
+      # !secret and !include, so that repo uses yamllint instead. Drop this hook
+      # there rather than fighting it.
+      - id: check-yaml
+
+  # Python lint gate. Lint-only, no --fix: blocks on real problems (undefined
+  # names, unused imports) but never rewrites your files, per the format-advisory
+  # policy in standards/CONVENTIONS.md.
+  - repo: https://github.com/astral-sh/ruff-pre-commit
+    rev: v0.6.9
+    hooks:
+      - id: ruff
+
+  # Replaces the manual "run ast.parse after every edit" ritual that several
+  # CLAUDE.md files documented. Every staged Python file must byte-compile.
+  - repo: local
+    hooks:
+      - id: compileall
+        name: python compileall (syntax check)
+        entry: python -m compileall -q
+        language: system
+        types: [python]
+        pass_filenames: false
+        args: ["."]
