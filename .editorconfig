@@ -1,0 +1,33 @@
+# Baseline editor settings. Part of the _baseline kit; see
+# https://github.com/Joe-User/engineering-standards -> standards/CONVENTIONS.md
+#
+# Deliberately conservative. The universal settings below are the ones that
+# actually cause diff noise (line endings, trailing whitespace, missing final
+# newline). Indentation is set only for languages with a strong convention, so
+# this file never fights an existing codebase's established style.
+root = true
+
+[*]
+charset = utf-8
+end_of_line = lf
+insert_final_newline = true
+trim_trailing_whitespace = true
+
+[*.{py,php}]
+indent_style = space
+indent_size = 4
+
+[*.{yml,yaml,json,toml}]
+indent_style = space
+indent_size = 2
+
+[*.md]
+# Markdown uses a trailing double-space for hard line breaks.
+trim_trailing_whitespace = false
+
+[Makefile]
+indent_style = tab
+
+[*.{bat,cmd,ps1}]
+# Windows shells. See .gitattributes: these keep CRLF.
+end_of_line = crlf

@@ -1,5 +1,42 @@
+# Baseline line-ending policy. Part of the _baseline kit; see
+# https://github.com/Joe-User/engineering-standards -> standards/CONVENTIONS.md
+#
+# Normalize to LF in the repository. Without this, Windows checkouts commit CRLF
+# and Linux CI runners see spurious whole-file diffs.
+#
+# NOTE: adding this file does not rewrite existing files. To normalize an
+# existing repo, run `git add --renormalize .` as a deliberate, separate commit
+# on a clean working tree, never mixed with other changes.
 * text=auto eol=lf
-*.sh text eol=lf
-*.py text eol=lf
-*.toml text eol=lf
+
+# Windows shells keep CRLF. Batch files in particular can misbehave with LF
+# around labels and goto.
+*.bat  text eol=crlf
+*.cmd  text eol=crlf
+*.ps1  text eol=crlf
+
+# Explicitly binary, so git never attempts EOL conversion or a text diff.
+*.png  binary
+*.jpg  binary
+*.jpeg binary
+*.gif  binary
+*.ico  binary
+*.pdf  binary
+*.zip  binary
+*.gz   binary
+*.woff binary
+*.woff2 binary
+*.ttf  binary
+*.bin  binary
+*.db   binary
+*.sqlite binary
+*.sqlite3 binary
+*.FCStd binary
+
+# --- repo-specific ---
+# Deployed to a Raspberry Pi. LF is functionally required for systemd units and
+# shell scripts, so pin them explicitly rather than relying on text=auto detection.
+*.sh      text eol=lf
+*.py      text eol=lf
+*.toml    text eol=lf
 *.service text eol=lf
