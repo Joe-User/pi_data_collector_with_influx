@@ -35,7 +35,7 @@ repos:
   #   repo: https://github.com/Joe-User/engineering-standards
   # and after the Gitea migration, to the Gitea URL. The `rev` stays the same.
   - repo: C:/Repositories/engineering-standards
-    rev: v1.0.0
+    rev: v1.1.1
     hooks:
       # Checks only the lines a commit ADDS. The portfolio carries ~2,200
       # pre-existing em dashes across 307 files, so whole-file gating would
