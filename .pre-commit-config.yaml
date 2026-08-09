@@ -30,11 +30,9 @@ repos:
   # rules exist once rather than being vendored into every project. The em-dash
   # rule previously existed as four separate hand-rolled implementations.
   #
-  # INTERIM: pointed at the local checkout because the remote does not exist yet.
-  # At Phase 5 (remotes) swap to:
-  #   repo: https://github.com/Joe-User/engineering-standards
-  # and after the Gitea migration, to the Gitea URL. The `rev` stays the same.
-  - repo: C:/Repositories/engineering-standards
+  # After the Gitea migration, swap the host here. The `rev` tag is unchanged
+  # by that move.
+  - repo: https://github.com/Joe-User/engineering-standards
     rev: v1.1.1
     hooks:
       # Checks only the lines a commit ADDS. The portfolio carries ~2,200
