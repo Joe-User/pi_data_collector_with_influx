@@ -33,7 +33,7 @@ repos:
   # After the Gitea migration, swap the host here. The `rev` tag is unchanged
   # by that move.
   - repo: https://github.com/Joe-User/engineering-standards
-    rev: v1.1.1
+    rev: v1.3.0
     hooks:
       # Checks only the lines a commit ADDS. The portfolio carries ~2,200
       # pre-existing em dashes across 307 files, so whole-file gating would
