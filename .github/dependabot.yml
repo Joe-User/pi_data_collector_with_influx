@@ -1,0 +1,48 @@
+# Baseline dependency updates. Every repo gets these two ecosystems regardless of
+# stack, because every repo has workflows and pre-commit hooks.
+#
+# MERGE, do not overwrite, if the stack kit ships its own dependabot.yml: append
+# its `updates:` entries under this one. The node kit adds npm, the python kit
+# adds uv.
+#
+# `cooldown` is the supply-chain control, not a politeness setting. It refuses to
+# open a PR for a release published in the last few days, which is the window in
+# which a compromised release is typically found and pulled. Dependabot defaults
+# to 3 days now; it is stated explicitly here so the value is a decision rather
+# than an inherited default that could change.
+version: 2
+updates:
+  # Keeps SHA-pinned actions current. This is the half of SHA pinning that stops
+  # a pin from quietly becoming a year-old version with a published advisory.
+  #
+  # GITEA MIGRATION: Dependabot is GitHub-only and this file stops working at the
+  # move. The portfolio uses five distinct actions in total, so hand-bumping is
+  # viable; self-hosted Renovate is the alternative if that stops being true.
+  - package-ecosystem: github-actions
+    directory: "/"
+    schedule:
+      interval: weekly
+    cooldown:
+      default-days: 3
+
+  # Bumps the `rev:` pins in .pre-commit-config.yaml. Supported since March 2026.
+  # Before this existed the README's answer was "run `pre-commit autoupdate`
+  # manually", which is the kind of remembering this repository exists to replace.
+  - package-ecosystem: pre-commit
+    directory: "/"
+    schedule:
+      interval: weekly
+    cooldown:
+      default-days: 3
+
+  # From the python kit: weekly uv lockfile updates.
+  - package-ecosystem: uv
+    directory: "/"
+    schedule:
+      interval: weekly
+    open-pull-requests-limit: 5
+    groups:
+      dev-dependencies:
+        dependency-type: development
+    cooldown:
+      default-days: 3

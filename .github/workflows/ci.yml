@@ -1,0 +1,84 @@
+name: CI
+
+on:
+  push:
+  pull_request:
+
+# PRs are optional on solo repos, so CI runs on every branch push. Without this,
+# work on a feature branch is completely ungated until it reaches main. This kit
+# previously filtered to `branches: [main]` while every other kit ran on all
+# pushes, which is the same split that left one repo's CI dormant for 117 commits.
+concurrency:
+  group: ${{ github.workflow }}-${{ github.head_ref || github.ref_name }}
+  cancel-in-progress: true
+
+# Read-only token. The default is writable, so a job that runs anything hostile
+# can push code or move tags. See standards/ENGINEERING.md, "Supply chain".
+permissions:
+  contents: read
+
+jobs:
+  # Lint and type analysis run once, at the floor. Running them on every matrix
+  # leg would triple the cost to re-report identical findings.
+  quality:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+
+      - name: Set up uv
+        uses: astral-sh/setup-uv@c771a70e6277c0a99b617c7a806ffedaca235ff9 # v9.0.0
+        with:
+          enable-cache: true
+
+      - name: Install dependencies
+        run: uv sync --dev
+
+      - name: Ruff lint
+        run: uv run ruff check .
+
+      # Advisory (policy: never blocks, never mutates). Reports would-be
+      # formatting changes. Promote to a gate per-repo only if you opt in.
+      - name: Ruff format check
+        continue-on-error: true
+        run: uv run ruff format --check .
+
+      # Advisory until the repo is clean, then remove continue-on-error.
+      - name: Mypy
+        continue-on-error: true
+        run: uv run mypy .
+
+      # Advisory: reports known CVEs in dependencies without failing the build.
+      - name: Dependency audit
+        continue-on-error: true
+        run: uvx pip-audit
+
+  # standards/CONVENTIONS.md settles the Python pin as "floor >=3.11, CI matrix
+  # across the supported span". That matrix previously existed only in the
+  # convention: this workflow ran a single unnamed interpreter, so the rule was
+  # a claim with nothing behind it.
+  #
+  # Floor and newest, not every release between. The floor catches code that
+  # quietly requires a newer interpreter than the project declares; the newest
+  # catches deprecations before they become breakage. The releases in the middle
+  # almost never fail alone.
+  test:
+    runs-on: ubuntu-latest
+    strategy:
+      fail-fast: false
+      matrix:
+        python-version: ["3.11", "3.14"]
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+
+      - name: Set up uv
+        uses: astral-sh/setup-uv@c771a70e6277c0a99b617c7a806ffedaca235ff9 # v9.0.0
+        with:
+          enable-cache: true
+
+      # uv downloads the interpreter if the runner does not carry it, so the
+      # matrix does not depend on what the runner image happens to ship.
+      - name: Install dependencies on Python ${{ matrix.python-version }}
+        run: uv sync --dev --python ${{ matrix.python-version }}
+
+      - name: Tests
+        run: uv run --python ${{ matrix.python-version }} pytest --cov --cov-report=term-missing

@@ -1,0 +1,210 @@
+name: Security
+
+# BASELINE KIT VERSION: v1.4.0
+#
+# This line is how a repo that already carries the baseline finds out it is
+# behind. It names the engineering-standards TAG that shipped this file. It is
+# NOT the `rev:` pin in .pre-commit-config.yaml, which tracks the hook scripts
+# and moves on a different schedule for different reasons.
+# `tools/baseline-drift.py` in the standards repo reads this line. Do not
+# hand-edit it in a consuming repo: it is a fact about which copy you have, not
+# a preference.
+
+# Lives in the BASELINE kit, not in each stack kit, deliberately. Every repo
+# copies the baseline, so these checks exist once and are maintained once. The
+# alternative was the same jobs pasted into eight kit workflows, which is the
+# duplication standards/ENGINEERING.md opens with under DRY.
+#
+# The test for whether a check belongs here rather than in a stack kit is not
+# "is it about security". It is whether the check needs the stack's toolchain
+# already installed in the job. zizmor reads workflow files, which every repo
+# has. semgrep picks its rules from the file extensions it finds. osv-scanner
+# reads lockfiles directly without resolving them. None of the three needs a
+# build, a `npm ci`, or a `uv sync`, so one job each covers every stack in the
+# portfolio. A check that DOES need an installed dependency tree fails that
+# test and stays in the stack kit's ci.yml.
+
+on:
+  push:
+  pull_request:
+  # Three things decay here without anyone touching the repo: an action you
+  # pinned last year picks up a published advisory, semgrep's rules learn about
+  # a vulnerability class that was already in your code before the rule
+  # existed, and a dependency you locked months ago gets a CVE. All three are
+  # found only by a run that nobody triggered.
+  schedule:
+    - cron: "0 7 * * 1"
+
+# The token these jobs are handed is read-only. Every workflow in these kits
+# declares this. See standards/ENGINEERING.md, "Supply chain".
+permissions:
+  contents: read
+
+concurrency:
+  group: ${{ github.workflow }}-${{ github.head_ref || github.ref_name }}
+  cancel-in-progress: true
+
+jobs:
+  workflows:
+    name: Workflow and action audit
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+
+      # Installed into a virtualenv: Ubuntu 24.04 marks its system Python as
+      # externally managed under PEP 668, so a bare `pip install` fails.
+      # Pinned, because a security tool that changes underneath you produces
+      # findings you cannot attribute to a change you made.
+      - name: Install zizmor
+        run: |
+          set -euo pipefail
+          python3 -m venv "$HOME/.zizmor-venv"
+          "$HOME/.zizmor-venv/bin/pip" install --quiet "zizmor==1.29.0"
+          echo "$HOME/.zizmor-venv/bin" >> "$GITHUB_PATH"
+
+      # ADVISORY on adoption, per the gate policy in standards/CONVENTIONS.md.
+      # Drop continue-on-error once a repo is clean, and the two audits that
+      # matter most here (unpinned-uses, excessive-permissions) become
+      # unfalsifiable rather than aspirational.
+      #
+      # GH_TOKEN enables the online audits, notably impostor-commit, which
+      # catches a SHA that does not actually belong to the repository it claims
+      # to. The token is read-only by the permissions block above.
+      - name: Audit workflows, actions, and configs
+        continue-on-error: true
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: zizmor --collect=all --format=github .
+
+  # ---------------------------------------------------------------------------
+  # Its own job rather than a step in `workflows:` above, for two reasons. The
+  # job there is named `workflows` because it audits workflows, and SAST is not
+  # that. More importantly, the gate policy promotes checks one at a time per
+  # repo: a repo that has gone clean on zizmor must be able to drop
+  # continue-on-error there without simultaneously promoting semgrep.
+  sast:
+    name: Static analysis
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+
+      # Its own virtualenv, for the same PEP 668 reason as zizmor, and because
+      # two independently pinned Python tools sharing one venv resolve each
+      # other's transitive dependencies and one of them silently loses the
+      # version you pinned it at.
+      - name: Install semgrep
+        env:
+          SEMGREP_VERSION: "1.177.0" # verified against PyPI 2026-09-23
+        run: |
+          set -euo pipefail
+          python3 -m venv "$HOME/.semgrep-venv"
+          "$HOME/.semgrep-venv/bin/pip" install --quiet "semgrep==${SEMGREP_VERSION}"
+          echo "$HOME/.semgrep-venv/bin" >> "$GITHUB_PATH"
+
+      # ADVISORY on adoption, per the gate policy in standards/CONVENTIONS.md.
+      #
+      # `--error` IS THE REASON THIS COMMAND IS WRITTEN OUT RATHER THAN LEFT AT
+      # DEFAULTS. semgrep exits 0 when it finds things unless you ask it not to.
+      # Without that flag, deleting continue-on-error at promotion time produces
+      # a gate that can never fail, and a gate that can never fail is
+      # indistinguishable from a clean repo. Advisory means "reports and does
+      # not block", never "runs a command that always succeeds".
+      #
+      # `p/ci` and NOT `p/security-audit`, measured rather than assumed. On
+      # 2026-09-23 the two packs were fetched and counted: p/ci carries 159
+      # rules, every one of them `confidence: HIGH`, with zero medium or low.
+      # p/security-audit carries 225, of which 127 (56%) are LOW, and semgrep's
+      # own definition of LOW is "expect a fair amount of false positives". A
+      # gate built on a pack that is half low-confidence is a gate somebody
+      # switches off within a month. Run p/security-audit by hand as a sweep,
+      # never as the thing wired to a red X.
+      #
+      # `--metrics=off` because semgrep reports usage back when a registry
+      # config is used, and nothing here needs to leave the runner.
+      #
+      # KNOWN GAP, recorded rather than left for someone to rediscover: the
+      # ruleset is fetched at run time, so it is the one mutable remote
+      # reference in this file. Vendoring it would pin the rules as well as the
+      # engine, and the p/ci snapshot is 364 KB, which is a large generated
+      # file to copy into every repo and regenerate by hand in each one. The
+      # tradeoff is deliberate while the check is advisory: rule drift on an
+      # advisory check means new findings appear, which is the job. Vendor the
+      # pack into this repo at the moment it is promoted to a hard gate, when
+      # reproducibility starts to matter more than freshness.
+      #
+      # This step needs network access to semgrep.dev. That is a migration item
+      # alongside the others in the kit README.
+      - name: Scan for vulnerability patterns
+        continue-on-error: true
+        run: |
+          set -euo pipefail
+          semgrep scan \
+            --config=p/ci \
+            --error \
+            --metrics=off \
+            --disable-version-check
+
+  # ---------------------------------------------------------------------------
+  # osv-scanner rather than `npm audit` plus `pip-audit`, one job instead of a
+  # step in every stack kit. It reads lockfiles directly with nothing installed,
+  # which is what lets it live here at all.
+  #
+  # The per-stack tools were the obvious choice and were rejected on specifics:
+  # `npm audit` requires network, has no offline mode, POSTs the full dependency
+  # tree to the registry, and reads only package-lock.json rather than pnpm or
+  # yarn lockfiles. `pip-audit` does not parse uv.lock and crashes inside a uv
+  # venv; that issue is closed as not planned. osv-scanner reads uv.lock and
+  # every npm lockfile format, and the same binary runs locally, so a finding
+  # here is reproducible with one command on the machine that caused it.
+  dependencies:
+    name: Dependency advisories
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+
+      # Pinned version, and the checksum is verified rather than trusted.
+      # standards/ENGINEERING.md, "Supply chain": fetch tools at a pinned
+      # version, never `latest`, and where the tool publishes checksums, verify
+      # them. A `releases/latest/download` URL is a mutable reference resolved
+      # at build time, which is an unpinned tag wearing different clothes.
+      - name: Install osv-scanner
+        env:
+          OSV_VERSION: "v2.6.0" # verified against the GitHub release 2026-09-23
+        run: |
+          set -euo pipefail
+          base="https://github.com/google/osv-scanner/releases/download/${OSV_VERSION}"
+          curl -fsSL -o osv-scanner "${base}/osv-scanner_linux_amd64"
+          curl -fsSL -o SHA256SUMS "${base}/osv-scanner_SHA256SUMS"
+
+          # Compared field by field rather than by rewriting the sums file into
+          # `sha256sum -c` format. The first attempt at this did the rewrite
+          # with sed and silently produced three spaces instead of the two that
+          # format requires, because the published file already uses the
+          # standard two-space separator. It was caught by running it; it would
+          # not have been caught by reading it. An explicit comparison has no
+          # format to get wrong.
+          expected=$(awk '$2 == "osv-scanner_linux_amd64" { print $1 }' SHA256SUMS)
+          if [ -z "${expected}" ]; then
+            echo "No checksum published for osv-scanner_linux_amd64" >&2
+            exit 1
+          fi
+          actual=$(sha256sum osv-scanner | awk '{ print $1 }')
+          if [ "${expected}" != "${actual}" ]; then
+            echo "Checksum mismatch for osv-scanner ${OSV_VERSION}" >&2
+            echo "  expected ${expected}" >&2
+            echo "  actual   ${actual}" >&2
+            exit 1
+          fi
+
+          chmod +x osv-scanner
+          rm -f SHA256SUMS
+
+      # ADVISORY on adoption, per the gate policy in standards/CONVENTIONS.md.
+      #
+      # `--recursive` so a repo with more than one lockfile, which several here
+      # have, is covered without naming each one. A repo with no lockfile at all
+      # scans clean and exits 0, which is why this job is safe to put in the
+      # baseline rather than gating it on stack detection.
+      - name: Scan lockfiles for known advisories
+        continue-on-error: true
+        run: ./osv-scanner scan source --recursive .

@@ -5,3 +5,33 @@ venv/
 .venv/
 *.log
 .env
+
+# From the python kit.
+# Python
+.eggs/
+build/
+dist/
+
+# Virtual environments
+env/
+
+# uv
+# (uv.lock IS committed; the cache is not)
+.uv-cache/
+
+# Test / coverage
+.pytest_cache/
+.coverage
+.coverage.*
+coverage.xml
+htmlcov/
+.mypy_cache/
+.ruff_cache/
+
+# Environment / secrets
+.env.local
+
+# OS / editor
+.DS_Store
+Thumbs.db
+*.swp

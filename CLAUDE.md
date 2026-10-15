@@ -10,9 +10,9 @@ Universal standards live in [`engineering-standards`](https://github.com/Joe-Use
 
 **Outstanding for this repo.** Pick these up the next time you work here rather than as a separate campaign:
 
-- [ ] Apply the **python** kit (CI is not present yet). Copy `kits/python/files/` and follow each kit's README.
+- [x] Apply the **python** kit. Copy `kits/python/files/` and follow each kit's README.
 - [ ] Write `docs/DEPLOYMENT.md` from `templates/DEPLOYMENT.md`, answering the seven requirements for the **systemd-raspberry-pi** target. Playbook: `standards/deployment/systemd-raspberry-pi.md`.
 - [ ] **This repo is PUBLIC** while every other repo in the portfolio is private. Confirm that is intentional.
 - [ ] **Revoke the GitHub PAT** that was embedded in the remote URL until 2026-08-08.
 - [ ] `setup.sh` scrapes an InfluxDB token out of a legacy `temperature_daemon.py`. A secret should be supplied at install, not recovered from a prior install.
-- [ ] `ruff` is configured in `pyproject.toml` but nothing runs it.
+- [x] `ruff` is configured in `pyproject.toml` and now runs in pre-commit and CI.
