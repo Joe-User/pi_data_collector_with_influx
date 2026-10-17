@@ -6,7 +6,8 @@ on this repository. It was an early 1-Wire temperature collector for a Pi
 
 Two of its features are on DataCollector's backlog, and this code is the
 reference for them: humidity reads (`read_sensor_humidity` in `collector.py`)
-and writing to a local plus a remote InfluxDB in one cycle (`write_points`).
+and auto-detecting every 1-Wire sensor on the bus (`find_temp_sensors`,
+`detect_sensor_type`).
 The checklist below is not being worked.
 
 ---
