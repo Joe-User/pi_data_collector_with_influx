@@ -1,6 +1,13 @@
 # pi_data_collector_with_influx
 
-> This file exists to carry the standards notice below. It does not yet describe the project. When you next work here, add what a newcomer would need: what it is, how to run it, and the traps. Start from `templates/repo-CLAUDE.md` in the standards repo, and record only what is NOT true of every other repo.
+**Superseded by `DataCollector` and archived (owner, 2026-10-17).** Do not build
+on this repository. It was an early 1-Wire temperature collector for a Pi
+(daemon, Textual TUI, InfluxDB writer) from before DataCollector was overhauled.
+
+Two of its features are on DataCollector's backlog, and this code is the
+reference for them: humidity reads (`read_sensor_humidity` in `collector.py`)
+and writing to a local plus a remote InfluxDB in one cycle (`write_points`).
+The checklist below is not being worked.
 
 ---
 
